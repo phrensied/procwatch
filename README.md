@@ -1,139 +1,139 @@
 # procwatch
 
-Утилита для мониторинга поведения сторонних исполняемых файлов в средах Windows и Unix. Выполняет запуск целевой программы, отслеживает порождение дочерних процессов и фиксирует изменения в файловой системе в режиме реального времени.
+A utility for monitoring the behavior of third-party executable files on Windows and Unix systems. It launches a target program, tracks the spawning of child processes, and records file system changes in real time.
 
-## Возможности
+## Features
 
-- **Кроссплатформенный мониторинг процессов** — сбор дерева процессов с идентификацией родительских связей через `/proc` (Linux) или WMI/CIM (Windows).
-- **Рекурсивное наблюдение за файловой системой** — опрос состояния файлов с настраиваемой глубиной рекурсии и интервалом опроса.
-- **Двухканальное логирование** — параллельный вывод в консоль и файл отчета с временными метками.
-- **Перехват потоков вывода** — перенаправление stdout и stderr целевого процесса в единый лог.
-- **Контролируемое завершение** — корректная остановка наблюдателей после завершения целевого процесса с учетом времени жизни дочерних процессов.
+- **Cross-platform process monitoring** — collects the process tree with parent-child relationship identification via `/proc` (Linux) or WMI/CIM (Windows).
+- **Recursive file system watching** — polls file state with configurable recursion depth and polling interval.
+- **Dual-channel logging** — simultaneous output to console and to a timestamped report file.
+- **Output stream capture** — redirects the target process's stdout and stderr into a unified log.
+- **Controlled shutdown** — gracefully stops watchers after the target process finishes, accounting for the lifetime of child processes.
 
 ---
 
-## Архитектура и принцип работы
+## Architecture and How It Works
 
-### Общая схема запуска и взаимодействия компонентов
+### Overall launch flow and component interaction
 
 ```mermaid
 flowchart TB
-    subgraph CLI["Инициализация"]
-        A[Парсинг аргументов командной строки] --> B{Указан exe?}
-        B -->|Нет| Z[Вывод справки и выход]
-        B -->|Да| C[Валидация пути к исполняемому файлу]
-        C --> D[Инициализация логгера]
-        D --> E[Формирование списка отслеживаемых директорий]
+    subgraph CLI["Initialization"]
+        A[Parse command-line arguments] --> B{exe specified?}
+        B -->|No| Z[Print help and exit]
+        B -->|Yes| C[Validate path to executable]
+        C --> D[Initialize logger]
+        D --> E[Build list of watched directories]
     end
 
-    subgraph RUNTIME["Время выполнения"]
-        E --> F[Запуск целевого процесса]
-        F --> G[Получение root PID]
-        G --> H[Запуск goroutine: pipeToLog stdout]
-        G --> I[Запуск goroutine: pipeToLog stderr]
-        G --> J[Запуск goroutine: watchProcesses]
-        G --> K[Запуск goroutine: watchFiles]
+    subgraph RUNTIME["Runtime"]
+        E --> F[Launch target process]
+        F --> G[Obtain root PID]
+        G --> H[Start goroutine: pipeToLog stdout]
+        G --> I[Start goroutine: pipeToLog stderr]
+        G --> J[Start goroutine: watchProcesses]
+        G --> K[Start goroutine: watchFiles]
     end
 
-    subgraph SHUTDOWN["Завершение"]
-        L[cmd.Wait: процесс завершен] --> M[Ожидание 5 секунд]
-        M --> N[Закрытие каналов stopProc / stopFiles]
-        N --> O[Ожидание doneProc / doneFiles]
-        O --> P[Завершение мониторинга]
+    subgraph SHUTDOWN["Shutdown"]
+        L[cmd.Wait: process finished] --> M[Wait 5 seconds]
+        M --> N[Close stopProc / stopFiles channels]
+        N --> O[Wait for doneProc / doneFiles]
+        O --> P[Monitoring finished]
     end
 
     RUNTIME --> SHUTDOWN
 ```
 
-### Модуль сбора снимков процессов
+### Process snapshot module
 
 ```mermaid
 flowchart LR
-    A[watchProcesses] -->|Периодический опрос| B[snapshotProcesses]
-    B --> C{ОС}
-    C -->|Linux| D[Чтение /proc/*/stat]
+    A[watchProcesses] -->|Periodic polling| B[snapshotProcesses]
+    B --> C{OS}
+    C -->|Linux| D[Read /proc/*/stat]
     C -->|Windows| E[PowerShell: Get-CimInstance Win32_Process]
-    D --> F[Парсинг PID, PPID, имени]
+    D --> F[Parse PID, PPID, name]
     E --> F
-    F --> G[Построение дерева процессов]
-    G --> H{PID в tracked?}
-    H -->|Нет, но PPID в tracked| I[Добавление в tracked]
-    H -->|Да| J[Пропуск]
-    I --> K[Логирование нового процесса]
-    G --> L[Проверка завершения]
-    L --> M[Логирование завершения процесса]
+    F --> G[Build process tree]
+    G --> H{PID in tracked?}
+    H -->|No, but PPID is tracked| I[Add to tracked]
+    H -->|Yes| J[Skip]
+    I --> K[Log new process]
+    G --> L[Check for termination]
+    L --> M[Log process termination]
 ```
 
-**Алгоритм отслеживания дочерних процессов:**
+**Child process tracking algorithm:**
 
-1. Формируется снимок всех процессов в системе.
-2. Выполняется итеративный обход: если родительский процесс (PPID) уже находится в множестве отслеживаемых, дочерний процесс (PID) добавляется в то же множество.
-3. Итерации продолжаются до тех пор, пока на очередном проходе не будет обнаружено новых процессов.
-4. Для каждого нового PID формируется запись в лог.
-5. Если PID присутствовал в предыдущем снимке, но отсутствует в текущем, фиксируется факт завершения процесса.
-6. Цикл наблюдения прерывается, когда корневой процесс и все его потомки завершены.
+1. A snapshot of all processes in the system is taken.
+2. An iterative traversal is performed: if a process's parent (PPID) is already in the tracked set, the child process (PID) is added to that same set.
+3. Iterations continue until a pass finds no new processes.
+4. A log entry is created for each new PID.
+5. If a PID was present in the previous snapshot but is missing from the current one, its termination is recorded.
+6. The monitoring loop stops once the root process and all of its descendants have terminated.
 
-### Модуль наблюдения за файловой системой
+### File system monitoring module
 
 ```mermaid
 flowchart TD
-    A[watchFiles] -->|Периодический опрос| B[scanDirs]
-    B --> C[walkLimited для каждой директории]
+    A[watchFiles] -->|Periodic polling| B[scanDirs]
+    B --> C[walkLimited for each directory]
     C --> D{depthLeft > 0?}
-    D -->|Да| E[Рекурсивный спуск]
-    D -->|Нет| F[Только текущий уровень]
-    E --> G[Сбор fileState: size, modTime]
+    D -->|Yes| E[Recurse deeper]
+    D -->|No| F[Current level only]
+    E --> G[Collect fileState: size, modTime]
     F --> G
-    G --> H[Сравнение с предыдущим снимком]
-    H --> I{Файл в prev?}
-    I -->|Нет| J[Лог: создание файла]
-    I -->|Да| K{size или modTime изменились?}
-    K -->|Да| L[Лог: изменение файла]
-    K -->|Нет| M[Пропуск]
-    H --> N{Файл в prev, но не в cur?}
-    N -->|Да| O[Лог: удаление файла]
+    G --> H[Compare with previous snapshot]
+    H --> I{File in prev?}
+    I -->|No| J[Log: file created]
+    I -->|Yes| K{size or modTime changed?}
+    K -->|Yes| L[Log: file modified]
+    K -->|No| M[Skip]
+    H --> N{File in prev but not in cur?}
+    N -->|Yes| O[Log: file deleted]
 ```
 
-**Алгоритм сканирования:**
+**Scanning algorithm:**
 
-1. Для каждой директории из списка выполняется рекурсивный обход с ограничением глубины.
-2. Собирается карта состояний файлов: абсолютный путь и структура `fileState` (размер, время модификации).
-3. Текущий снимок сравнивается с предыдущим:
-   - Отсутствующий в `prev`, но присутствующий в `cur` — создание.
-   - Присутствующий в обоих с различающимися атрибутами — изменение.
-   - Присутствующий в `prev`, но отсутствующий в `cur` — удаление.
-4. Текущий снимок становится предыдущим для следующей итерации.
+1. Each directory in the list is recursively walked with a depth limit.
+2. A map of file states is collected: absolute path and a `fileState` structure (size, modification time).
+3. The current snapshot is compared to the previous one:
+   - Absent from `prev` but present in `cur` — creation.
+   - Present in both with differing attributes — modification.
+   - Present in `prev` but absent from `cur` — deletion.
+4. The current snapshot becomes the previous snapshot for the next iteration.
 
-### Модуль логирования
+### Logging module
 
 ```mermaid
 flowchart LR
-    A[Logger.Printf] --> B[Блокировка mutex]
-    B --> C[Форматирование строки]
-    C --> D[Вывод в os.Stdout]
-    C --> E{Файл указан?}
-    E -->|Да| F[Запись в файл]
-    E -->|Нет| G[Пропуск]
-    F --> H[Разблокировка mutex]
+    A[Logger.Printf] --> B[Lock mutex]
+    B --> C[Format string]
+    C --> D[Write to os.Stdout]
+    C --> E{File specified?}
+    E -->|Yes| F[Write to file]
+    E -->|No| G[Skip]
+    F --> H[Unlock mutex]
     G --> H
     D --> H
 ```
 
-Компонент `Logger` обеспечивает потокобезопасный вывод с единым форматом временной метки `[HH:MM:SS.mmm] [%-8s] сообщение`. Запись в файл и консоль выполняется атомарно под защитой мьютекса.
+The `Logger` component provides thread-safe output with a single timestamp format `[HH:MM:SS.mmm] [%-8s] message`. Writes to file and console are performed atomically, protected by a mutex.
 
 ---
 
-## Установка
+## Installation and Build
 
-Требования: Go 1.18 или новее.
+Requirements: Go 1.18 or newer.
 
 ```bash
-git clone https://github.com/username/procwatch.git
+git clone https://github.com/phrensied/procwatch.git
 cd procwatch
 go build -o procwatch procwatch.go
 ```
 
-Для Windows рекомендуется сборка с указанием целевой архитектуры:
+For Windows, building with an explicit target architecture is recommended:
 
 ```bash
 GOOS=windows GOARCH=amd64 go build -o procwatch.exe procwatch.go
@@ -141,48 +141,48 @@ GOOS=windows GOARCH=amd64 go build -o procwatch.exe procwatch.go
 
 ---
 
-## Использование
+## Usage
 
 ```text
-procwatch -exe <путь к программе> [-args "аргументы"] [-watch "dir1,dir2"] [-log report.log]
+procwatch -exe <path to program> [-args "arguments"] [-watch "dir1,dir2"] [-log report.log]
 ```
 
-### Аргументы командной строки
+### Command-line arguments
 
-| Флаг | По умолчанию | Описание |
-|------|-------------|----------|
-| `-exe` | *обязательный* | Путь к исполняемому файлу, за которым необходимо вести наблюдение |
-| `-args` | `""` | Аргументы командной строки для целевой программы (через пробел, кавычки для значений с пробелами) |
-| `-watch` | `""` | Дополнительные директории для отслеживания через запятую |
-| `-interval` | `700ms` | Интервал опроса процессов и файловой системы |
-| `-log` | `""` | Путь к файлу отчета (если не указан — только консоль) |
-| `-no-defaults` | `false` | Отключить стандартный набор директорий (temp, appdata и др.) |
-| `-depth` | `6` | Максимальная глубина рекурсии при сканировании |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-exe` | *required* | Path to the executable file to monitor |
+| `-args` | `""` | Command-line arguments for the target program (space-separated, quote values containing spaces) |
+| `-watch` | `""` | Additional directories to watch, comma-separated |
+| `-interval` | `700ms` | Polling interval for processes and the file system |
+| `-log` | `""` | Path to the report file (console only if not specified) |
+| `-no-defaults` | `false` | Disable the default set of directories (temp, appdata, etc.) |
+| `-depth` | `6` | Maximum recursion depth when scanning |
 
-### Стандартный набор отслеживаемых директорий
+### Default set of watched directories
 
 **Windows:**
-- Директория с исполняемым файлом
+- The directory containing the executable
 - `%TEMP%`, `%TMP%`, `%APPDATA%`, `%LOCALAPPDATA%`
 - `%ProgramData%`, `%ProgramFiles%`, `%ProgramFiles(x86)%`
 - `%USERPROFILE%\Desktop`, `%USERPROFILE%\Start Menu`
 
 **Unix:**
-- Директория с исполняемым файлом
-- `/tmp` (или аналог через `os.TempDir()`)
+- The directory containing the executable
+- `/tmp` (or its equivalent via `os.TempDir()`)
 - `$HOME`
 
 ---
 
-## Примеры
+## Examples
 
-### Базовый запуск
+### Basic run
 
 ```bash
 ./procwatch -exe /usr/bin/suspicious_tool -log report.log
 ```
 
-### Запуск с аргументами и дополнительными директориями
+### Run with arguments and additional directories
 
 ```bash
 ./procwatch -exe ./malware_sample \
@@ -192,7 +192,7 @@ procwatch -exe <путь к программе> [-args "аргументы"] [-w
     -depth 4
 ```
 
-### Только файловая система без стандартных путей
+### File system only, without default paths
 
 ```bash
 ./procwatch -exe ./target.exe \
@@ -204,18 +204,18 @@ procwatch -exe <путь к программе> [-args "аргументы"] [-w
 
 ---
 
-## Формат выходных данных
+## Output Format
 
-Каждая запись лога имеет единый формат:
+Each log entry follows a single format:
 
 ```
-[14:34:05.123] [INFO    ] Цель: /path/to/exe
-[14:34:05.124] [PROCESS ] Запущен основной процесс PID=12345 (exe_name)
-[14:34:05.456] [PROCESS ] Создан дочерний процесс PID=12346 PPID=12345 (child_name)
-[14:34:06.789] [FILE    ] Создан файл: /tmp/malware_drop.exe (2048 байт)
-[14:34:07.012] [FILE    ] Изменён файл: /tmp/config.dat (1024 -> 2048 байт)
-[14:34:08.345] [PROCESS ] Процесс PID=12346 завершился
-[14:34:10.678] [INFO    ] Программа завершилась успешно (код 0)
+[14:34:05.123] [INFO    ] Target: /path/to/exe
+[14:34:05.124] [PROCESS ] Started main process PID=12345 (exe_name)
+[14:34:05.456] [PROCESS ] Created child process PID=12346 PPID=12345 (child_name)
+[14:34:06.789] [FILE    ] Created file: /tmp/malware_drop.exe (2048 bytes)
+[14:34:07.012] [FILE    ] Modified file: /tmp/config.dat (1024 -> 2048 bytes)
+[14:34:08.345] [PROCESS ] Process PID=12346 exited
+[14:34:10.678] [INFO    ] Program finished successfully (code 0)
 ```
 
 ---
