@@ -129,7 +129,7 @@ Requirements: Go 1.18 or newer.
 
 ```bash
 git clone https://github.com/phrensied/procwatch.git
-cd procwatch
+cd procwatch\source
 go build -o procwatch procwatch.go
 ```
 
